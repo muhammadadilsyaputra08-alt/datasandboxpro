@@ -1,47 +1,39 @@
 package com.datasandbox.pro.data
 
-import android.content.ContentValues
 import android.content.Context
-import com.datasandbox.pro.engine.DependencyGraph
-import com.datasandbox.pro.engine.EvaluationContext
-import com.datasandbox.pro.engine.FormulaEngine
+import com.datasandbox.pro.core.RecalcEngine
 import com.datasandbox.pro.model.Cell
 import com.datasandbox.pro.model.CellAddress
 import com.datasandbox.pro.model.CellValue
-import com.datasandbox.pro.model.ColumnDef
 import com.datasandbox.pro.model.ColumnType
+import com.datasandbox.pro.storage.ColumnSpec
+import com.datasandbox.pro.storage.DocumentRepository
 import org.json.JSONObject
 
 /**
- * In-memory grid backed by the .dsb SQLite file. Handles CRUD, formula
- * recalculation via [DependencyGraph] + [FormulaEngine], and simple
- * import/export helpers.
+ * SheetRepository implementation for the feature/formula-engine branch.
+ *
+ * Responsibilities:
+ * - in-memory cache of cells (by table -> row -> column)
+ * - persist rows into the SqliteDocument via DocumentRepository (basic)
+ * - recalculate formulas using RecalcEngine
+ *
+ * NOTE: This implementation focuses on wiring the RecalcEngine to the
+ * repository and providing a pragmatic persistence path via SqliteDocument.
  */
-class SheetRepository(context: Context) {
+class SheetRepository(private val context: Context, private val docName: String = "default.dsb") {
 
-    private val helper = DsbDatabase(context)
-    private val engine = FormulaEngine()
-    private val graph = DependencyGraph()
+    private val docRepo = DocumentRepository(context)
+    private val document = docRepo.openDocument(docName)
+    private val engine = RecalcEngine()
 
-    // table name -> row -> column letter -> Cell
-    private val cache = LinkedHashMap<String, LinkedHashMap<Int, MutableMap<String, Cell>>>()
+    // table -> rowIndex -> column -> Cell
+    private val cache = linkedMapOf<String, LinkedHashMap<Int, MutableMap<String, Cell>>>()
 
     fun ensureDefaultTable(name: String, columnNames: List<String>) {
-        val db = helper.writableDatabase
-        val exists = db.rawQuery("SELECT id FROM tables WHERE name = ?", arrayOf(name)).use { it.moveToFirst() }
-        if (exists) return
-
-        val tableId = db.insert("tables", null, ContentValues().apply {
-            put("name", name)
-        })
-        columnNames.forEachIndexed { idx, colName ->
-            db.insert("columns", null, ContentValues().apply {
-                put("table_id", tableId)
-                put("name", colName)
-                put("col_index", idx)
-                put("type", ColumnType.TEXT.name)
-            })
-        }
+        // ensure table exists in SQLite document
+        val cols = columnNames.map { ColumnSpec(it, "TEXT") }
+        document.createTable(name, cols)
     }
 
     fun setCell(table: String, row: Int, column: String, rawInput: String) {
@@ -49,14 +41,15 @@ class SheetRepository(context: Context) {
         val cell = Cell(
             address = CellAddress(table, row, column),
             rawInput = rawInput,
-            formula = if (isFormula) rawInput else null
+            formula = if (isFormula) rawInput else null,
+            value = if (!isFormula) coerceLiteral(rawInput) else CellValue.Empty
         )
 
         val tableRows = cache.getOrPut(table) { LinkedHashMap() }
         val rowMap = tableRows.getOrPut(row) { mutableMapOf() }
         rowMap[column] = cell
 
-        recalculate(cell.address)
+        recalculate(table, row)
         persistRow(table, row, rowMap)
     }
 
@@ -66,34 +59,51 @@ class SheetRepository(context: Context) {
 
     fun rowsFor(table: String): List<Int> = cache[table]?.keys?.sorted() ?: emptyList()
 
-    private fun recalculate(changed: CellAddress) {
-        val cell = cache[changed.table]?.get(changed.row)?.get(changed.column) ?: return
-        val ctx = context(changed.table)
-
-        if (cell.formula != null) {
-            val deps = engine.extractDependencies(cell.formula, changed.table)
-            graph.setDependencies(changed, deps)
-        } else {
-            graph.setDependencies(changed, emptyList())
-            cell.value = coerceLiteral(cell.rawInput)
+    private fun recalculate(table: String, changedRow: Int) {
+        // collect cells for this table into map expected by RecalcEngine
+        val addrToCell = mutableMapOf<com.datasandbox.pro.core.CellAddress, com.datasandbox.pro.core.Cell>()
+        val rows = cache[table] ?: return
+        for ((rIdx, cols) in rows) {
+            for ((col, cell) in cols) {
+                // convert model.Cell to core.Cell used by RecalcEngine
+                val coreAddr = com.datasandbox.pro.core.CellAddress(cell.address.table, cell.address.row, cell.address.column)
+                val coreCell = com.datasandbox.pro.core.Cell(
+                    address = coreAddr,
+                    value = when (val v = cell.value) {
+                        is CellValue.Num -> com.datasandbox.pro.core.CellValue.Number(v.value)
+                        is CellValue.Str -> com.datasandbox.pro.core.CellValue.Text(v.value)
+                        is CellValue.Bool -> com.datasandbox.pro.core.CellValue.Bool(v.value)
+                        is CellValue.Err -> com.datasandbox.pro.core.CellValue.Error(v.message)
+                        else -> com.datasandbox.pro.core.CellValue.Empty
+                    },
+                    formula = cell.formula,
+                    dependencies = emptyList()
+                )
+                addrToCell[coreAddr] = coreCell
+            }
         }
 
-        val order = try {
-            graph.topologicalOrderFrom(changed)
-        } catch (e: Exception) {
-            cell.value = CellValue.Err("CIRCULAR")
-            return
-        }
-
-        order.forEach { addr ->
-            val c = cache[addr.table]?.get(addr.row)?.get(addr.column) ?: return@forEach
-            if (c.formula != null) {
-                c.value = engine.evaluate(c.formula, context(addr.table))
+        val out = engine.recalc(addrToCell)
+        // apply results back to cache
+        out.forEach { (addr, coreCell) ->
+            val t = addr.sheet
+            val rowMap = cache[t]?.get(addr.row)
+            if (rowMap != null) {
+                val modelCell = rowMap[addr.column]
+                if (modelCell != null) {
+                    modelCell.value = when (val v = coreCell.value) {
+                        is com.datasandbox.pro.core.CellValue.Number -> CellValue.Num(v.value)
+                        is com.datasandbox.pro.core.CellValue.Text -> CellValue.Str(v.value)
+                        is com.datasandbox.pro.core.CellValue.Bool -> CellValue.Bool(v.value)
+                        is com.datasandbox.pro.core.CellValue.Error -> CellValue.Err(v.message)
+                        else -> CellValue.Empty
+                    }
+                }
             }
         }
     }
 
-    private fun coerceLiteral(raw: String): CellValue = when {
+    private fun coerceLiteral(raw: String) = when {
         raw.isEmpty() -> CellValue.Empty
         raw.toDoubleOrNull() != null -> CellValue.Num(raw.toDouble())
         raw.equals("TRUE", true) -> CellValue.Bool(true)
@@ -101,37 +111,33 @@ class SheetRepository(context: Context) {
         else -> CellValue.Str(raw)
     }
 
-    private fun context(table: String) = object : EvaluationContext {
-        override val currentTable = table
-        override fun cellValue(address: CellAddress) = getValue(address)
-        override fun columnValues(t: String, column: String): List<CellValue> =
-            rowsFor(t).mapNotNull { r -> getCell(t, r, column)?.value }
-    }
-
     private fun persistRow(table: String, row: Int, rowMap: Map<String, Cell>) {
-        val db = helper.writableDatabase
-        val tableId = db.rawQuery("SELECT id FROM tables WHERE name = ?", arrayOf(table))
-            .use { if (it.moveToFirst()) it.getLong(0) else return }
-
-        val json = JSONObject()
-        rowMap.forEach { (col, cell) -> json.put(col, cell.rawInput) }
-
-        val existing = db.rawQuery(
-            "SELECT id FROM rows WHERE table_id = ? AND row_index = ?",
-            arrayOf(tableId.toString(), row.toString())
-        ).use { if (it.moveToFirst()) it.getLong(0) else null }
-
-        val values = ContentValues().apply {
-            put("table_id", tableId)
-            put("row_index", row)
-            put("data_json", json.toString())
-        }
-        if (existing != null) {
-            db.update("rows", values, "id = ?", arrayOf(existing.toString()))
-        } else {
-            db.insert("rows", null, values)
+        try {
+            // ensure table columns exist in SQLite doc
+            val cols = rowMap.keys.map { ColumnSpec(it, "TEXT") }
+            document.createTable(table, cols)
+            // write row as JSON into a single 'data' column if table has that schema
+            val json = JSONObject()
+            rowMap.forEach { (col, cell) -> json.put(col, cell.rawInput) }
+            // Attempt to insert into the table; if columns match, insertable; otherwise, insert into rows table
+            try {
+                val rowMapString = rowMap.mapValues { it.value.rawInput }
+                document.insertRow(table, rowMapString)
+            } catch (ex: Exception) {
+                // fallback: insert into generic rows table
+                val rowsJson = JSONObject().apply {
+                    put("row_index", row)
+                    put("data", json.toString())
+                }
+                document.insertRow("rows", mapOf("table_name" to table, "row_index" to row.toString(), "data_json" to json.toString()))
+            }
+        } catch (ex: Exception) {
+            // swallow persistence errors for now
+            ex.printStackTrace()
         }
     }
 
-    fun close() = helper.close()
+    fun close() {
+        // nothing to close for now; SqliteDocument has close handled by Android framework when needed
+    }
 }
