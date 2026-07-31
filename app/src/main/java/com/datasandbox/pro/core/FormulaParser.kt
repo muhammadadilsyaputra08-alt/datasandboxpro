@@ -1,15 +1,9 @@
 package com.datasandbox.pro.core
 
 /**
- * Very small recursive-descent parser/tokenizer for spreadsheet-like formulas.
- * Supports numeric literals, parentheses, unary minus, and function calls with comma-separated args.
- *
- * This is intentionally lightweight to avoid adding large dependencies. It is
- * sufficient to evaluate simple formulas such as:
- *  - =SUM(1,2,3)
- *  - =AVERAGE(10,20)
- *  - =PMT(0.01, 12, 10000)
- *  - =IF(1, 10, 20)
+ * Updated parser supporting colon (ranges) token and recognizing alphanumeric identifiers
+ * (including cell addresses like A1). This file replaces the earlier very small parser
+ * to add Range support.
  */
 
 private sealed class Token {
@@ -19,6 +13,7 @@ private sealed class Token {
     object RParen : Token()
     object Comma : Token()
     object Minus : Token()
+    object Colon : Token()
     object EOF : Token()
 }
 
@@ -37,6 +32,7 @@ private class Tokenizer(private val input: String) {
             ch == ')' -> { next(); return Token.RParen }
             ch == ',' -> { next(); return Token.Comma }
             ch == '-' -> { next(); return Token.Minus }
+            ch == ':' -> { next(); return Token.Colon }
             ch.isDigit() || ch == '.' -> return readNumber()
             ch.isLetter() -> return readIdent()
             ch == '=' -> { next(); return nextToken() } // skip leading '=' if present
@@ -105,6 +101,15 @@ private class Parser(private val source: String) {
                     if (lookahead is Token.RParen) eat()
                     return Expr.FunctionCall(ident, args)
                 }
+                if (lookahead is Token.Colon) {
+                    // range start: IDENT ':' IDENT
+                    eat() // consume ':'
+                    val endTok = lookahead
+                    if (endTok is Token.Ident) {
+                        val endIdent = (eat() as Token.Ident).name
+                        return Expr.Range(ident, endIdent)
+                    }
+                }
                 return Expr.Variable(ident)
             }
             is Token.LParen -> {
@@ -127,6 +132,7 @@ private sealed class Expr {
     data class Variable(val name: String) : Expr()
     data class UnaryMinus(val inner: Expr) : Expr()
     data class FunctionCall(val name: String, val args: List<Expr>) : Expr()
+    data class Range(val start: String, val end: String) : Expr()
 }
 
 internal fun parseFormula(formula: String): Expr {
