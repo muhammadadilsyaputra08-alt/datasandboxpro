@@ -1,18 +1,23 @@
 package com.datasandbox.pro.core
 
 /**
- * Minimal FormulaEngine scaffold.
- * This is an initial implementation intended as a starting point for
- * integrating a full formula parser/evaluator (ANTLR or custom).
- *
- * Current responsibilities:
- *  - evaluate(formula, context): placeholder returning a string
- *  - pmt(...) : basic PMT financial function
+ * Bridge API used by the rest of the app. Evaluate formulas expressed as strings
+ * and return a textual result. This delegates heavy lifting to FormulaEvaluator
+ * and the tiny parser.
  */
+
 object FormulaEngine {
     fun evaluate(formula: String, context: Map<String, Double> = emptyMap()): String {
-        // TODO: Replace with proper formula parser + AST evaluator
-        return "<not-implemented: $formula>"
+        return try {
+            val ctx = EvaluationContext(values = context)
+            val value = FormulaEvaluator.evaluate(formula, ctx)
+            // Normalize -0.0 to 0.0
+            val v = if (value == -0.0) 0.0 else value
+            // If integer, show without decimal when it fits
+            if (v % 1.0 == 0.0) v.toLong().toString() else v.toString()
+        } catch (ex: Exception) {
+            "#ERROR: ${ex.message}"
+        }
     }
 
     /**
