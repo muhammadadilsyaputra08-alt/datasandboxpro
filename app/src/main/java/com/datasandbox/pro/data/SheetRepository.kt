@@ -34,6 +34,57 @@ class SheetRepository(private val context: Context, private val docName: String 
         // ensure table exists in SQLite document
         val cols = columnNames.map { ColumnSpec(it, "TEXT") }
         document.createTable(name, cols)
+        // attempt to load any existing rows for this table into cache
+        loadExistingData()
+    }
+
+    private fun loadExistingData() {
+        try {
+            // Build map of table id -> table name from the metadata 'tables' table if present
+            val tablesMeta = try {
+                document.queryTable("tables")
+            } catch (ex: Exception) {
+                emptyList<Map<String, String>>()
+            }
+            val idToName = tablesMeta.mapNotNull { m -> m["id"] to m["name"] }.toMap()
+
+            // Read the generic 'rows' table (if present) which stores row_index and data_json
+            val rowsMeta = try {
+                document.queryTable("rows")
+            } catch (ex: Exception) {
+                emptyList<Map<String, String>>()
+            }
+
+            for (r in rowsMeta) {
+                val tableId = r["table_id"] ?: continue
+                val tableName = idToName[tableId] ?: continue
+                val rowIndex = r["row_index"]?.toIntOrNull() ?: continue
+                val dataJson = r["data_json"] ?: continue
+                // parse JSON and populate cache
+                try {
+                    val json = JSONObject(dataJson)
+                    val map = mutableMapOf<String, Cell>()
+                    val keys = json.keys()
+                    while (keys.hasNext()) {
+                        val col = keys.next()
+                        val raw = json.optString(col, "")
+                        val c = Cell(
+                            address = CellAddress(tableName, rowIndex, col),
+                            rawInput = raw,
+                            formula = if (raw.startsWith("=")) raw else null,
+                            value = if (!raw.startsWith("=")) coerceLiteral(raw) else CellValue.Empty
+                        )
+                        map[col] = c
+                    }
+                    val tableRows = cache.getOrPut(tableName) { LinkedHashMap() }
+                    tableRows[rowIndex] = map
+                } catch (ex: Exception) {
+                    // ignore malformed JSON for now
+                }
+            }
+        } catch (ex: Exception) {
+            // swallow
+        }
     }
 
     fun setCell(table: String, row: Int, column: String, rawInput: String) {
