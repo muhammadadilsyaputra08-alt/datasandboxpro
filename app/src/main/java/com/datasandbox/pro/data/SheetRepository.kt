@@ -134,7 +134,18 @@ class SheetRepository(private val context: Context, private val docName: String 
             }
         }
 
-        val out = engine.recalc(addrToCell)
+        // prepare tables map for evaluator (use cache keys as table names)
+        val tablesMap = mutableMapOf<String, List<Map<String, String>>>()
+        for (t in cache.keys) {
+            try {
+                val rowsList = document.queryTable(t)
+                if (rowsList.isNotEmpty()) tablesMap[t] = rowsList
+            } catch (ex: Exception) {
+                // ignore
+            }
+        }
+
+        val out = engine.recalc(addrToCell, tablesMap)
         // apply results back to cache
         out.forEach { (addr, coreCell) ->
             val t = addr.sheet

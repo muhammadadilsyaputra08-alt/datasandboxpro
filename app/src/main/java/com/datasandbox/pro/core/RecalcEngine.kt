@@ -7,7 +7,7 @@ package com.datasandbox.pro.core
  */
 
 class RecalcEngine {
-    fun recalc(cells: Map<CellAddress, Cell>): Map<CellAddress, Cell> {
+    fun recalc(cells: Map<CellAddress, Cell>, tables: Map<String, List<Map<String, String>>> = emptyMap()): Map<CellAddress, Cell> {
         // Prepare adjacency: dependency -> set(dependents)
         val graph = DependencyGraph()
         // map of address string -> cell
@@ -67,7 +67,7 @@ class RecalcEngine {
         for (node in order) {
             val formula = formulaMap[node] ?: continue
             try {
-                val ctx = EvaluationContext(values = evaluatedValues)
+                val ctx = EvaluationContext(values = evaluatedValues, tables = tables)
                 val value = FormulaEvaluator.evaluate(formula, ctx)
                 val newCell = addrToCell[node]?.copy(value = CellValue.Number(value)) ?: Cell(
                     address = node,
