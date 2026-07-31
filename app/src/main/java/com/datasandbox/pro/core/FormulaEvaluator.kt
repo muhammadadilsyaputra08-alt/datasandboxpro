@@ -99,6 +99,12 @@ object FormulaEvaluator {
             }
         }
 
+        fun exprToString(e: Expr): String = when (e) {
+            is Expr.Variable -> e.name
+            is Expr.LiteralNumber -> e.value.toString()
+            else -> evalExpr(e, ctx).toString()
+        }
+
         when (name.uppercase()) {
             "SUM" -> {
                 val vals = args.flatMap { flattenArgToValues(it) }
@@ -121,18 +127,43 @@ object FormulaEvaluator {
                 val fv = evalExpr(args.getOrNull(3) ?: Expr.LiteralNumber(0.0), ctx)
                 return FormulaEngine.pmt(rate, nper, pv, fv)
             }
+            "MATCH" -> {
+                // MATCH(lookupValue, range, match_type)
+                val lookup = args.getOrNull(0) ?: return 0.0
+                val rangeExpr = args.getOrNull(1)
+                val lookupStr = exprToString(lookup)
+                if (rangeExpr is Expr.Range) {
+                    val vals = ctx.getRangeValues(rangeExpr.start, rangeExpr.end)
+                    // match_type ignored for now; do exact match on stringified value
+                    val idx = vals.indexOfFirst { it.toString() == lookupStr }
+                    return if (idx >= 0) (idx + 1).toDouble() else 0.0
+                }
+                return 0.0
+            }
+            "INDEX" -> {
+                // INDEX(range, row, col?) - for 1D ranges we interpret row as index
+                val rangeExpr = args.getOrNull(0)
+                val rowIdx = args.getOrNull(1)?.let { evalExpr(it, ctx).toInt() } ?: 1
+                if (rangeExpr is Expr.Range) {
+                    val vals = ctx.getRangeValues(rangeExpr.start, rangeExpr.end)
+                    if (rowIdx in 1..vals.size) return vals[rowIdx - 1]
+                }
+                return 0.0
+            }
             "VLOOKUP" -> {
                 // VLOOKUP(lookupValue, tableName, colIndex, exactMatch)
-                // support simple tableName referenced via variable name (not quoted)
                 val lookupExpr = args.getOrNull(0)
                 val tableExpr = args.getOrNull(1)
-                val colIndex = evalExpr(args.getOrNull(2) ?: Expr.LiteralNumber(2.0), ctx).toInt()
+                val colIndex = args.getOrNull(2)?.let { evalExpr(it, ctx).toInt() } ?: 2
                 val lookupValue = lookupExpr?.let { evalExpr(it, ctx).toString() } ?: ""
                 if (tableExpr is Expr.Variable) {
                     val tblName = tableExpr.name
                     val tbl = ctx.tables[tblName]
                     if (tbl != null) {
-                        val row = tbl.firstOrNull { it.values.firstOrNull()?.value == lookupValue }
+                        val row = tbl.firstOrNull { r ->
+                            val first = r.values.firstOrNull()?.value ?: ""
+                            first == lookupValue
+                        }
                         if (row != null) {
                             val valStr = row.values.elementAtOrNull(colIndex - 1)?.value ?: "0"
                             return valStr.toDoubleOrNull() ?: 0.0
