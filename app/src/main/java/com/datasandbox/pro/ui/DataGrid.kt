@@ -9,12 +9,17 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardActions
 import com.datasandbox.pro.viewmodel.SheetViewModel
 
 private val CELL_WIDTH = 96.dp
@@ -53,19 +58,36 @@ fun DataGrid(
                     viewModel.columns.forEach { col ->
                         val isSelected = selected == row to col
                         val isError = viewModel.isError(row, col)
+
                         GridCellBox(
                             width = CELL_WIDTH,
                             selected = isSelected,
                             error = isError,
                             onClick = { onCellTap(row, col) }
                         ) {
-                            // show formula when selected else show evaluated value
-                            val text = if (isSelected) viewModel.rawInputAt(row, col) else viewModel.valueAt(row, col)
-                            Text(
-                                text = text,
-                                style = MaterialTheme.typography.bodyMedium,
-                                maxLines = 1
-                            )
+                            if (isSelected) {
+                                // inline editor for selected cell
+                                var cellText by remember(row, col, recalcTick) { mutableStateOf(viewModel.rawInputAt(row, col)) }
+                                val focusManager = LocalFocusManager.current
+                                OutlinedTextField(
+                                    value = cellText,
+                                    onValueChange = { cellText = it },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth(),
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                                    keyboardActions = KeyboardActions(onDone = {
+                                        viewModel.commitEdit(row, col, cellText)
+                                        focusManager.clearFocus()
+                                    })
+                                )
+                            } else {
+                                // show evaluated value when not editing
+                                Text(
+                                    text = viewModel.valueAt(row, col),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    maxLines = 1
+                                )
+                            }
                         }
                     }
                 }
