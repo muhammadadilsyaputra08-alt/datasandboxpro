@@ -59,8 +59,10 @@ fun DataGrid(
                             error = isError,
                             onClick = { onCellTap(row, col) }
                         ) {
+                            // show formula when selected else show evaluated value
+                            val text = if (isSelected) viewModel.rawInputAt(row, col) else viewModel.valueAt(row, col)
                             Text(
-                                text = viewModel.valueAt(row, col),
+                                text = text,
                                 style = MaterialTheme.typography.bodyMedium,
                                 maxLines = 1
                             )
