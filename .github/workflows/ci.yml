@@ -17,6 +17,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Generate Gradle wrapper
+        run: gradle wrapper --gradle-version 8.7
       - name: Grant execute
         run: chmod +x gradlew || true
       - name: Run tests
