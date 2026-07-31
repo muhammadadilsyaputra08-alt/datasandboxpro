@@ -1,70 +1,12 @@
 package com.datasandbox.pro.core
 
 /**
- * Formula evaluator updated to support Range AST nodes and to allow functions to
- * receive raw Expr arguments. EvaluationContext exposes cell values keyed by
- * address (e.g. "A1") and helper to expand ranges.
+ * Formula evaluator improvements: better error signalling and VLOOKUP enhancements
+ * including optional approximate match behavior for numeric ranges.
  */
 
-data class EvaluationContext(
-    val values: Map<String, Double> = emptyMap(),
-    val tables: Map<String, List<Map<String, String>>> = emptyMap()
-) {
-    fun getCellValue(addr: String): Double = values[addr.uppercase()] ?: 0.0
-
-    fun getRangeValues(start: String, end: String): List<Double> {
-        // Support simple ranges like A1:A10 (same column) or A1:C1 (same row)
-        val s = start.uppercase()
-        val e = end.uppercase()
-        val sMatch = Regex("^([A-Z]+)([0-9]+)").find(s)
-        val eMatch = Regex("^([A-Z]+)([0-9]+)").find(e)
-        if (sMatch == null || eMatch == null) return emptyList()
-        val sCol = sMatch.groupValues[1]
-        val sRow = sMatch.groupValues[2].toInt()
-        val eCol = eMatch.groupValues[1]
-        val eRow = eMatch.groupValues[2].toInt()
-        val results = mutableListOf<Double>()
-        if (sCol == eCol) {
-            val from = minOf(sRow, eRow)
-            val to = maxOf(sRow, eRow)
-            for (r in from..to) {
-                val key = sCol + r.toString()
-                results.add(getCellValue(key))
-            }
-        } else if (sRow == eRow) {
-            // Row range like A1:C1
-            val fromColIndex = colToIndex(sCol)
-            val toColIndex = colToIndex(eCol)
-            val from = minOf(fromColIndex, toColIndex)
-            val to = maxOf(fromColIndex, toColIndex)
-            for (c in from..to) {
-                val key = indexToCol(c) + sRow.toString()
-                results.add(getCellValue(key))
-            }
-        }
-        return results
-    }
-
-    private fun colToIndex(col: String): Int {
-        var res = 0
-        for (ch in col) {
-            res = res * 26 + (ch - 'A' + 1)
-        }
-        return res
-    }
-
-    private fun indexToCol(index: Int): String {
-        var i = index
-        var s = ""
-        var n = i
-        while (n > 0) {
-            val rem = (n - 1) % 26
-            s = ('A' + rem) + s
-            n = (n - 1) / 26
-        }
-        return s
-    }
-}
+// Simple exception types to propagate spreadsheet-style errors
+class FormulaError(val code: String, message: String) : Exception(message)
 
 object FormulaEvaluator {
     fun evaluate(expr: Any, context: EvaluationContext = EvaluationContext()): Double {
@@ -73,7 +15,12 @@ object FormulaEvaluator {
             is Expr -> expr
             else -> return 0.0
         }
-        return evalExpr(ast, context)
+        return try {
+            evalExpr(ast, context)
+        } catch (e: FormulaError) {
+            // propagate as NaN to indicate an error state to caller; caller may map to CellValue.Error
+            Double.NaN
+        }
     }
 
     private fun evalExpr(e: Expr, ctx: EvaluationContext): Double {
@@ -83,9 +30,6 @@ object FormulaEvaluator {
             is Expr.UnaryMinus -> -evalExpr(e.inner, ctx)
             is Expr.FunctionCall -> evalFunction(e.name, e.args, ctx)
             is Expr.Range -> {
-                // Range evaluated as sum by default when used in expression context,
-                // but in practice functions like SUM/AVERAGE will explicitly handle ranges.
-                // Here we return the sum to provide a deterministic fallback.
                 ctx.getRangeValues(e.start, e.end).sum()
             }
         }
@@ -128,51 +72,61 @@ object FormulaEvaluator {
                 return FormulaEngine.pmt(rate, nper, pv, fv)
             }
             "MATCH" -> {
-                // MATCH(lookupValue, range, match_type)
                 val lookup = args.getOrNull(0) ?: return 0.0
                 val rangeExpr = args.getOrNull(1)
                 val lookupStr = exprToString(lookup)
                 if (rangeExpr is Expr.Range) {
                     val vals = ctx.getRangeValues(rangeExpr.start, rangeExpr.end)
-                    // match_type ignored for now; do exact match on stringified value
                     val idx = vals.indexOfFirst { it.toString() == lookupStr }
-                    return if (idx >= 0) (idx + 1).toDouble() else 0.0
+                    return if (idx >= 0) (idx + 1).toDouble() else throw FormulaError("#N/A", "No match")
                 }
-                return 0.0
+                throw FormulaError("#VALUE!", "Invalid range")
             }
             "INDEX" -> {
-                // INDEX(range, row, col?) - for 1D ranges we interpret row as index
                 val rangeExpr = args.getOrNull(0)
                 val rowIdx = args.getOrNull(1)?.let { evalExpr(it, ctx).toInt() } ?: 1
                 if (rangeExpr is Expr.Range) {
                     val vals = ctx.getRangeValues(rangeExpr.start, rangeExpr.end)
                     if (rowIdx in 1..vals.size) return vals[rowIdx - 1]
+                    throw FormulaError("#REF!", "Index out of bounds")
                 }
-                return 0.0
+                throw FormulaError("#VALUE!", "Invalid range")
             }
             "VLOOKUP" -> {
-                // VLOOKUP(lookupValue, tableName, colIndex, exactMatch)
                 val lookupExpr = args.getOrNull(0)
                 val tableExpr = args.getOrNull(1)
                 val colIndex = args.getOrNull(2)?.let { evalExpr(it, ctx).toInt() } ?: 2
+                val exactArg = args.getOrNull(3)?.let { evalExpr(it, ctx) } ?: 1.0
+                val exactMatch = exactArg != 0.0
                 val lookupValue = lookupExpr?.let { evalExpr(it, ctx).toString() } ?: ""
                 if (tableExpr is Expr.Variable) {
                     val tblName = tableExpr.name
                     val tbl = ctx.tables[tblName]
                     if (tbl != null) {
-                        val row = tbl.firstOrNull { r ->
-                            val first = r.values.firstOrNull()?.value ?: ""
-                            first == lookupValue
-                        }
+                        // find exact match first
+                        val row = tbl.firstOrNull { r -> r.values.firstOrNull()?.value == lookupValue }
                         if (row != null) {
-                            val valStr = row.values.elementAtOrNull(colIndex - 1)?.value ?: "0"
-                            return valStr.toDoubleOrNull() ?: 0.0
+                            val valStr = row.values.elementAtOrNull(colIndex - 1)?.value ?: throw FormulaError("#N/A", "Column missing")
+                            return valStr.toDoubleOrNull() ?: throw FormulaError("#VALUE!", "Non-numeric lookup result")
                         }
+                        if (!exactMatch) {
+                            // approximate match: for numeric lookup, find closest smaller
+                            val numeric = lookupValue.toDoubleOrNull()
+                            if (numeric != null) {
+                                val candidates = tbl.mapNotNull { r -> r.values.firstOrNull()?.value?.toDoubleOrNull()?.let { Pair(it, r) } }
+                                val smaller = candidates.filter { it.first <= numeric }.maxByOrNull { it.first }
+                                if (smaller != null) {
+                                    val valStr = smaller.second.values.elementAtOrNull(colIndex - 1)?.value ?: throw FormulaError("#N/A", "Column missing")
+                                    return valStr.toDoubleOrNull() ?: throw FormulaError("#VALUE!", "Non-numeric lookup result")
+                                }
+                            }
+                        }
+                        throw FormulaError("#N/A", "No match")
                     }
                 }
-                return 0.0
+                throw FormulaError("#REF!", "Table not found")
             }
         }
-        return 0.0
+        throw FormulaError("#NAME?", "Unknown function $name")
     }
 }
