@@ -20,6 +20,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.input.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardActions
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.Key
 import com.datasandbox.pro.viewmodel.SheetViewModel
 
 private val CELL_WIDTH = 96.dp
@@ -30,7 +33,8 @@ private val HEADER_COLOR = Color(0xFFE7ECE8)
 fun DataGrid(
     viewModel: SheetViewModel,
     selected: Pair<Int, String>?,
-    onCellTap: (row: Int, column: String) -> Unit
+    onCellTap: (row: Int, column: String) -> Unit,
+    onCellCommit: (row: Int, column: String, newValue: String) -> Unit
 ) {
     val hScroll = rememberScrollState()
 
@@ -73,10 +77,41 @@ fun DataGrid(
                                     value = cellText,
                                     onValueChange = { cellText = it },
                                     singleLine = true,
-                                    modifier = Modifier.fillMaxWidth(),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .onKeyEvent { ev ->
+                                            if (ev.type == KeyEventType.KeyUp) {
+                                                when (ev.key) {
+                                                    Key.DirectionDown -> {
+                                                        onCellCommit(row, col, cellText)
+                                                        onCellTap(row + 1, col)
+                                                        true
+                                                    }
+                                                    Key.DirectionUp -> {
+                                                        onCellCommit(row, col, cellText)
+                                                        onCellTap(row - 1, col)
+                                                        true
+                                                    }
+                                                    Key.DirectionLeft -> {
+                                                        onCellCommit(row, col, cellText)
+                                                        // move left: find previous column index
+                                                        val idx = viewModel.columns.indexOf(col)
+                                                        if (idx > 0) onCellTap(row, viewModel.columns[idx - 1])
+                                                        true
+                                                    }
+                                                    Key.DirectionRight -> {
+                                                        onCellCommit(row, col, cellText)
+                                                        val idx = viewModel.columns.indexOf(col)
+                                                        if (idx < viewModel.columns.size - 1) onCellTap(row, viewModel.columns[idx + 1])
+                                                        true
+                                                    }
+                                                    else -> false
+                                                }
+                                            } else false
+                                        },
                                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                                     keyboardActions = KeyboardActions(onDone = {
-                                        viewModel.commitEdit(row, col, cellText)
+                                        onCellCommit(row, col, cellText)
                                         focusManager.clearFocus()
                                     })
                                 )
