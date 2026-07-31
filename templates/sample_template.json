@@ -1,0 +1,18 @@
+{
+  "id": "template_sample_1",
+  "name": "Sample Sales Template",
+  "category": "Business",
+  "description": "Simple sales table with date, product, quantity and revenue",
+  "tables": [
+    {
+      "name": "sales",
+      "columns": [
+        {"name": "date", "type": "DATE"},
+        {"name": "product", "type": "TEXT"},
+        {"name": "quantity", "type": "NUMBER"},
+        {"name": "revenue", "type": "NUMBER"}
+      ]
+    }
+  ],
+  "dashboards": []
+}
