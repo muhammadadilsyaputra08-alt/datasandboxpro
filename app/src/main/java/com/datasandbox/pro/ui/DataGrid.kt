@@ -23,6 +23,8 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.key
 import com.datasandbox.pro.viewmodel.SheetViewModel
 
 private val CELL_WIDTH = 96.dp
