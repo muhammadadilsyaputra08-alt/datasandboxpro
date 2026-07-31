@@ -55,7 +55,7 @@ class RecalcEngine {
             // mark cells in cycle as error; for simplicity mark all formula cells as error
             for ((addr, cell) in addrToCell) {
                 if (!cell.formula.isNullOrBlank()) {
-                    result[addr] = cell.copy(value = CellValue.Error("Circular reference"))
+                    result[addr] = cell.copy(value = CellValue.Error("#CIRCULAR"))
                 } else result[addr] = cell
             }
             return result
@@ -75,8 +75,14 @@ class RecalcEngine {
                 )
                 result[node] = newCell
                 evaluatedValues[cellAddressToKey(node)] = value
+            } catch (fe: FormulaError) {
+                // map evaluator error code to cell error value
+                val err = CellValue.Error(fe.code)
+                result[node] = addrToCell[node]?.copy(value = err) ?: Cell(address = node, value = err)
             } catch (ex: Exception) {
-                result[node] = addrToCell[node]?.copy(value = CellValue.Error(ex.message ?: "error"))
+                val msg = ex.message ?: "error"
+                val err = CellValue.Error(msg)
+                result[node] = addrToCell[node]?.copy(value = err) ?: Cell(address = node, value = err)
             }
         }
 
